@@ -283,24 +283,22 @@ def process_single_chapter(driver, chapter_index, force=False):
                     
                     # 强制模式：通过检测视频播放状态来判断是否完成
                     last_time = current_time_val
-                    no_progress_count = 0
+                    consecutive_paused_count = 0
                     max_no_progress = 30  # 如果30秒没有进度，认为视频已完成
-                    start_time = time.time()
+                    no_progress_count = 0
                     
                     print("    正在播放（强制模式）...")
                     while True:
                         try:
-                            # 尝试获取当前时间
-                            try:
-                                curr_time = convertTime(current_ele.text)
-                            except:
-                                curr_time = last_time
+                            curr_time = last_time
+                            video_playing = True
                             
-                            # 尝试通过 JavaScript 获取视频状态
+                            # 优先使用 JavaScript 获取视频状态（更准确）
                             try:
                                 video_element = driver.find_element(By.TAG_NAME, "video")
                                 js_current = driver.execute_script("return arguments[0].currentTime;", video_element)
                                 js_duration = driver.execute_script("return arguments[0].duration;", video_element)
+                                js_paused = driver.execute_script("return arguments[0].paused;", video_element)
                                 js_ended = driver.execute_script("return arguments[0].ended;", video_element)
                                 
                                 if js_ended:
@@ -311,10 +309,17 @@ def process_single_chapter(driver, chapter_index, force=False):
                                     print(f"\n    视频播放完成（当前: {js_current:.1f}s / 总时长: {js_duration:.1f}s）。")
                                     break
                                 
-                                if js_current > curr_time:
+                                if js_current is not None and js_current >= 0:
                                     curr_time = int(js_current)
+                                
+                                video_playing = not js_paused
+                                
                             except:
-                                pass
+                                # 回退到页面元素
+                                try:
+                                    curr_time = convertTime(current_ele.text)
+                                except:
+                                    pass
                             
                             # 检查视频是否在播放（时间是否在增加）
                             if curr_time > last_time:
@@ -323,7 +328,12 @@ def process_single_chapter(driver, chapter_index, force=False):
                                 print(f"    播放中... {curr_time}s", end='\r')
                             else:
                                 no_progress_count += 1
-                                if no_progress_count > 5:  # 如果5秒没有进度，尝试恢复播放
+                            
+                            # 检测暂停状态（只在真正检测到暂停时才处理）
+                            if not video_playing:
+                                consecutive_paused_count += 1
+                                # 只有在连续检测到暂停超过3秒时才尝试恢复
+                                if consecutive_paused_count == 3:
                                     try:
                                         play_control = driver.find_element(By.CLASS_NAME, "vjs-play-control")
                                         if "vjs-paused" in play_control.get_attribute("class"):
@@ -331,7 +341,9 @@ def process_single_chapter(driver, chapter_index, force=False):
                                             print("\n    检测到暂停，已恢复播放")
                                     except:
                                         pass
-                                    no_progress_count = 0
+                                    consecutive_paused_count = 0
+                            else:
+                                consecutive_paused_count = 0
                             
                             # 如果30秒没有进度，可能视频已完成
                             if no_progress_count >= max_no_progress:
@@ -341,7 +353,7 @@ def process_single_chapter(driver, chapter_index, force=False):
                             time.sleep(1)
                             
                         except Exception as e:
-                            print(f"\n    [错误] 播放循环中出错: {e}")
+                            # 静默处理错误
                             time.sleep(1)
                     
                     print("    视频处理完成。")
@@ -373,54 +385,71 @@ def process_single_chapter(driver, chapter_index, force=False):
                         pbar.update(current_time_val)
 
                     last_time = current_time_val
-                    no_progress_count = 0  # 记录没有进度的时间
+                    consecutive_paused_count = 0  # 连续检测到暂停的次数
                     
                     while True:
                         try:
-                            curr_time = convertTime(current_ele.text)
+                            # 优先使用 JavaScript 获取视频时间（更准确可靠）
+                            curr_time = current_time_val
+                            video_playing = True
                             
-                            # 检查视频是否在播放（时间是否在增加）
-                            if curr_time <= last_time:
-                                no_progress_count += 1
-                                if no_progress_count > 60:  # 如果60秒没有进度，尝试恢复播放
-                                    print("\n    [警告] 检测到视频可能暂停，尝试恢复播放...")
-                                    try:
-                                        play_control = driver.find_element(By.CLASS_NAME, "vjs-play-control")
-                                        if "vjs-paused" in play_control.get_attribute("class"):
-                                            play_control.click()
-                                            print("    已恢复播放")
-                                    except:
-                                        pass
-                                    no_progress_count = 0
-                            else:
-                                no_progress_count = 0
-                                last_time = curr_time
+                            try:
+                                video_element = driver.find_element(By.TAG_NAME, "video")
+                                js_current = driver.execute_script("return arguments[0].currentTime;", video_element)
+                                js_paused = driver.execute_script("return arguments[0].paused;", video_element)
+                                js_ended = driver.execute_script("return arguments[0].ended;", video_element)
+                                
+                                if js_ended:
+                                    pbar.n = total_time
+                                    pbar.refresh()
+                                    print("\n    视频播放完成（检测到 ended 状态）。")
+                                    break
+                                
+                                # 使用 JavaScript 获取的时间（更准确）
+                                if js_current is not None and js_current >= 0:
+                                    curr_time = int(js_current)
+                                
+                                video_playing = not js_paused
+                                
+                            except Exception as js_error:
+                                # 如果 JavaScript 获取失败，回退到页面元素
+                                try:
+                                    curr_time = convertTime(current_ele.text)
+                                except:
+                                    curr_time = last_time
                             
-                            # 更新进度条 (根据当前播放时间更新)
+                            # 更新进度条（使用更准确的时间）
                             if curr_time > pbar.n:
                                 pbar.update(curr_time - pbar.n)
                             
                             # 检查是否播放完成（剩余时间少于3秒）
                             remaining = total_time - curr_time
                             if remaining < 3 and remaining >= 0:
-                                pbar.n = total_time # 填满
+                                pbar.n = total_time
                                 pbar.refresh()
                                 print("\n    视频播放完成。")
                                 break
                             
-                            time.sleep(1)
+                            # 检测暂停状态（只在真正检测到暂停时才处理）
+                            if not video_playing:
+                                consecutive_paused_count += 1
+                                # 只有在连续检测到暂停超过3秒时才尝试恢复
+                                if consecutive_paused_count == 3:
+                                    try:
+                                        play_control = driver.find_element(By.CLASS_NAME, "vjs-play-control")
+                                        if "vjs-paused" in play_control.get_attribute("class"):
+                                            play_control.click()
+                                            print("\n    检测到暂停，已恢复播放")
+                                    except:
+                                        pass
+                            else:
+                                consecutive_paused_count = 0
+                                last_time = curr_time
                             
-                            # 防暂停检测：定期检查播放状态
-                            try:
-                                play_control = driver.find_element(By.CLASS_NAME, "vjs-play-control")
-                                if "vjs-paused" in play_control.get_attribute("class"):
-                                    play_control.click()
-                            except:
-                                pass
+                            time.sleep(1)
                                 
                         except Exception as e:
-                            print(f"\n    [错误] 播放循环中出错: {e}")
-                            # 尝试继续
+                            # 静默处理错误，避免频繁打印
                             time.sleep(1)
                         
             except Exception as e:

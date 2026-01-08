@@ -18,6 +18,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
 import time
 import pyautogui
+import argparse
 
 from tqdm import tqdm
 
@@ -117,9 +118,12 @@ def scan_progress(driver):
     print("未完成章节索引：", ret)
     return ret
 
-def process_single_chapter(driver, chapter_index):
+def process_single_chapter(driver, chapter_index, force=False):
     """
     处理单个章节：包含视频播放和PPT查看
+    :param driver: WebDriver 实例
+    :param chapter_index: 章节索引
+    :param force: 是否强制播放（即使无法获取时长）
     """
     print(f"\n>>> 开始处理第 {chapter_index} 个章节...")
     
@@ -171,38 +175,196 @@ def process_single_chapter(driver, chapter_index):
             
             # 播放逻辑
             try:
+                print(f"    正在处理视频 {v_idx+1}...")
                 start_btn = WebDriverWait(driver, 10).until(EC.visibility_of_element_located((By.CLASS_NAME, "vjs-big-play-button")))
                 driver.execute_script("arguments[0].click();", start_btn)
-                time.sleep(2)
+                print("    已点击播放按钮，等待视频加载...")
+                time.sleep(3)  # 增加等待时间，确保视频开始播放
                 
-                # --- 修改：智能跳过已完成视频 ---
+                # 静音处理
+                try:
+                    print("    正在设置静音...")
+                    # 尝试多种方式设置静音
+                    # 方式1: 通过音量按钮
+                    try:
+                        volume_btn = driver.find_element(By.CLASS_NAME, "vjs-mute-control")
+                        if "vjs-vol-0" not in volume_btn.get_attribute("class"):
+                            volume_btn.click()
+                            print("    已通过音量按钮设置静音")
+                    except:
+                        pass
+                    
+                    # 方式2: 通过 JavaScript 直接设置视频元素静音
+                    try:
+                        video_element = driver.find_element(By.TAG_NAME, "video")
+                        driver.execute_script("arguments[0].muted = true;", video_element)
+                        driver.execute_script("arguments[0].volume = 0;", video_element)
+                        print("    已通过 JavaScript 设置静音")
+                    except:
+                        pass
+                except Exception as e:
+                    print(f"    静音设置失败（继续播放）: {e}")
+                
                 # 获取时长和当前进度
-                duration_ele = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CLASS_NAME, "vjs-duration-display")))
-                current_ele = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CLASS_NAME, "vjs-current-time-display")))
+                duration_ele = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "vjs-duration-display")))
+                current_ele = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "vjs-current-time-display")))
+                
+                # 等待视频真正开始播放（时间开始变化）
+                print("    等待视频开始播放...")
+                initial_time = convertTime(current_ele.text)
+                wait_count = 0
+                while wait_count < 10:  # 最多等待10秒
+                    time.sleep(1)
+                    current_check = convertTime(current_ele.text)
+                    if current_check > initial_time or current_check > 0:
+                        print(f"    视频已开始播放 (当前时间: {current_check}s)")
+                        break
+                    wait_count += 1
                 
                 total_time = convertTime(duration_ele.text)
                 current_time_val = convertTime(current_ele.text)
                 
-                # 如果剩余时间少于 5 秒，或者已经看完，则跳过
-                if total_time > 0 and (total_time - current_time_val) < 5:
-                    print(f"    [跳过] 视频 {v_idx+1} 已完成 ({current_time_val}s / {total_time}s)。")
+                print(f"    [调试] 视频总时长: {total_time}s, 当前时间: {current_time_val}s")
+                
+                # 如果总时长为0，尝试通过 JavaScript 获取视频时长
+                if total_time == 0:
+                    print("    视频时长未加载，尝试通过 JavaScript 获取...")
+                    try:
+                        video_element = driver.find_element(By.TAG_NAME, "video")
+                        js_duration = driver.execute_script("return arguments[0].duration;", video_element)
+                        if js_duration and js_duration > 0:
+                            total_time = int(js_duration)
+                            print(f"    通过 JavaScript 获取到时长: {total_time}s")
+                    except:
+                        pass
+                
+                # 如果总时长为0，说明可能还没加载完成，等待一下
+                if total_time == 0:
+                    print("    视频时长未加载，等待中...")
+                    for _ in range(5):
+                        time.sleep(1)
+                        total_time = convertTime(duration_ele.text)
+                        if total_time > 0:
+                            break
+                        # 再次尝试 JavaScript 获取
+                        try:
+                            video_element = driver.find_element(By.TAG_NAME, "video")
+                            js_duration = driver.execute_script("return arguments[0].duration;", video_element)
+                            if js_duration and js_duration > 0:
+                                total_time = int(js_duration)
+                                break
+                        except:
+                            pass
+                
+                # 如果仍然无法获取时长，根据 force 参数决定是否继续
+                if total_time == 0:
+                    if force:
+                        print(f"    [强制模式] 无法获取视频时长，将使用智能检测方式继续播放...")
+                        # 使用智能检测方式：通过检测视频播放状态来判断
+                        total_time = 0  # 标记为未知时长
+                    else:
+                        print(f"    [警告] 无法获取视频时长，跳过此视频")
+                        print(f"    提示: 使用 --force 参数可以强制播放")
+                        continue
+                
+                # 如果总时长为0（强制模式），使用智能检测
+                if total_time == 0:
+                    print(f"    开始播放视频 (强制模式：时长未知，将智能检测完成状态)")
+                    
+                    # 倍速设置 (尝试)
+                    try:
+                        speed_btn = driver.find_element(By.CLASS_NAME, "vjs-playback-rate")
+                        speed_btn.click()
+                        time.sleep(0.5)
+                        speed_btn.click() # 切换到 2x
+                        print("    已设置倍速播放")
+                    except:
+                        print("    无法设置倍速（可能不支持）")
+                    
+                    # 强制模式：通过检测视频播放状态来判断是否完成
+                    last_time = current_time_val
+                    no_progress_count = 0
+                    max_no_progress = 30  # 如果30秒没有进度，认为视频已完成
+                    start_time = time.time()
+                    
+                    print("    正在播放（强制模式）...")
+                    while True:
+                        try:
+                            # 尝试获取当前时间
+                            try:
+                                curr_time = convertTime(current_ele.text)
+                            except:
+                                curr_time = last_time
+                            
+                            # 尝试通过 JavaScript 获取视频状态
+                            try:
+                                video_element = driver.find_element(By.TAG_NAME, "video")
+                                js_current = driver.execute_script("return arguments[0].currentTime;", video_element)
+                                js_duration = driver.execute_script("return arguments[0].duration;", video_element)
+                                js_ended = driver.execute_script("return arguments[0].ended;", video_element)
+                                
+                                if js_ended:
+                                    print("\n    视频播放完成（检测到 ended 状态）。")
+                                    break
+                                
+                                if js_duration > 0 and js_current >= js_duration - 2:
+                                    print(f"\n    视频播放完成（当前: {js_current:.1f}s / 总时长: {js_duration:.1f}s）。")
+                                    break
+                                
+                                if js_current > curr_time:
+                                    curr_time = int(js_current)
+                            except:
+                                pass
+                            
+                            # 检查视频是否在播放（时间是否在增加）
+                            if curr_time > last_time:
+                                no_progress_count = 0
+                                last_time = curr_time
+                                print(f"    播放中... {curr_time}s", end='\r')
+                            else:
+                                no_progress_count += 1
+                                if no_progress_count > 5:  # 如果5秒没有进度，尝试恢复播放
+                                    try:
+                                        play_control = driver.find_element(By.CLASS_NAME, "vjs-play-control")
+                                        if "vjs-paused" in play_control.get_attribute("class"):
+                                            play_control.click()
+                                            print("\n    检测到暂停，已恢复播放")
+                                    except:
+                                        pass
+                                    no_progress_count = 0
+                            
+                            # 如果30秒没有进度，可能视频已完成
+                            if no_progress_count >= max_no_progress:
+                                print(f"\n    检测到长时间无进度，可能视频已完成。")
+                                break
+                            
+                            time.sleep(1)
+                            
+                        except Exception as e:
+                            print(f"\n    [错误] 播放循环中出错: {e}")
+                            time.sleep(1)
+                    
+                    print("    视频处理完成。")
                     continue
-                # -----------------------------
+                
+                # 正常模式：有明确的时长
+                # 如果剩余时间少于 5 秒，则跳过（但确保不是刚播放就判断）
+                remaining_time = total_time - current_time_val
+                if remaining_time < 5 and current_time_val > 10:  # 只有当已经播放超过10秒且剩余少于5秒时才跳过
+                    print(f"    [跳过] 视频 {v_idx+1} 已完成 ({current_time_val}s / {total_time}s，剩余 {remaining_time}s)。")
+                    continue
+                
+                print(f"    开始播放视频 (总时长: {total_time}s, 当前: {current_time_val}s, 剩余: {remaining_time}s)")
 
-                # 静音 (可选)
-                # ...
-
-                # 倍速 (尝试)
+                # 倍速设置 (尝试)
                 try:
                     speed_btn = driver.find_element(By.CLASS_NAME, "vjs-playback-rate")
                     speed_btn.click()
                     time.sleep(0.5)
                     speed_btn.click() # 切换到 2x
+                    print("    已设置倍速播放")
                 except:
-                    pass
-
-                if total_time == 0:
-                    total_time = 1 # 防止进度条报错
+                    print("    无法设置倍速（可能不支持）")
                 
                 # 循环检测直到结束，使用 tqdm 显示进度条
                 with tqdm(total=total_time, desc=f"    视频 {v_idx+1}", unit="s", leave=True, ncols=80) as pbar:
@@ -210,32 +372,61 @@ def process_single_chapter(driver, chapter_index):
                     if current_time_val > 0:
                         pbar.update(current_time_val)
 
+                    last_time = current_time_val
+                    no_progress_count = 0  # 记录没有进度的时间
+                    
                     while True:
-                        curr_time = convertTime(current_ele.text)
-                        
-                        # 更新进度条 (根据当前播放时间更新)
-                        if curr_time > pbar.n:
-                            pbar.update(curr_time - pbar.n)
-                            
-                        if total_time > 0 and (total_time - curr_time) < 3:
-                            pbar.n = total_time # 填满
-                            pbar.refresh()
-                            print("\n    视频播放完成。")
-                            break
-                        
-                        time.sleep(1) # 提高更新频率
-                        
-                        # 防暂停检测：如果出现暂停按钮变成了播放按钮，说明视频暂停了，点一下
                         try:
-                            play_control = driver.find_element(By.CLASS_NAME, "vjs-play-control")
-                            if "vjs-paused" in play_control.get_attribute("class"):
-                                play_control.click()
-                                # print("    检测到暂停，自动继续播放。") # 不打印防止破坏进度条
-                        except:
-                            pass
+                            curr_time = convertTime(current_ele.text)
+                            
+                            # 检查视频是否在播放（时间是否在增加）
+                            if curr_time <= last_time:
+                                no_progress_count += 1
+                                if no_progress_count > 60:  # 如果60秒没有进度，尝试恢复播放
+                                    print("\n    [警告] 检测到视频可能暂停，尝试恢复播放...")
+                                    try:
+                                        play_control = driver.find_element(By.CLASS_NAME, "vjs-play-control")
+                                        if "vjs-paused" in play_control.get_attribute("class"):
+                                            play_control.click()
+                                            print("    已恢复播放")
+                                    except:
+                                        pass
+                                    no_progress_count = 0
+                            else:
+                                no_progress_count = 0
+                                last_time = curr_time
+                            
+                            # 更新进度条 (根据当前播放时间更新)
+                            if curr_time > pbar.n:
+                                pbar.update(curr_time - pbar.n)
+                            
+                            # 检查是否播放完成（剩余时间少于3秒）
+                            remaining = total_time - curr_time
+                            if remaining < 3 and remaining >= 0:
+                                pbar.n = total_time # 填满
+                                pbar.refresh()
+                                print("\n    视频播放完成。")
+                                break
+                            
+                            time.sleep(1)
+                            
+                            # 防暂停检测：定期检查播放状态
+                            try:
+                                play_control = driver.find_element(By.CLASS_NAME, "vjs-play-control")
+                                if "vjs-paused" in play_control.get_attribute("class"):
+                                    play_control.click()
+                            except:
+                                pass
+                                
+                        except Exception as e:
+                            print(f"\n    [错误] 播放循环中出错: {e}")
+                            # 尝试继续
+                            time.sleep(1)
                         
             except Exception as e:
-                print(f"    视频 {v_idx+1} 处理出错或已完成: {e}")
+                print(f"    视频 {v_idx+1} 处理出错: {e}")
+                import traceback
+                traceback.print_exc()
                 
     except Exception as e:
         print(f"  视频模块出错: {e}")
@@ -292,6 +483,14 @@ def process_single_chapter(driver, chapter_index):
     driver.switch_to.default_content()
 
 def main():
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='超星慕课刷课脚本')
+    parser.add_argument('-url', '--url', type=str, required=True,
+                        help='课程章节页面的URL')
+    parser.add_argument('--force', action='store_true',
+                        help='强制播放模式：即使无法获取视频时长也继续播放')
+    args = parser.parse_args()
+    
     print("="*60)
     print("   超星慕课刷课脚本 (Mac 单实例版)")
     print("   特点：只登录一次，自动顺序刷课，无需重复扫码。")
@@ -302,7 +501,7 @@ def main():
     driver.maximize_window()
     
     # 2. 手动登录引导
-    url = "http://mooc.mooc.ucas.edu.cn/mooc-ans/mycourse/studentstudy?chapterId=510034&courseId=350140000032176&clazzid=350140000026834&cpi=350140000200983&enc=51b2637149279c90754aef00a49e2b85&mooc2=1&openc=8d3aa6a2456475bc1dbe2e14019815a0"
+    url = args.url
     try:
         driver.get(url)
         print("\n>>> 浏览器已打开。")
@@ -336,7 +535,7 @@ def main():
                     driver.get(course_list_url)
                     time.sleep(3)
                 
-                process_single_chapter(driver, idx)
+                process_single_chapter(driver, idx, force=args.force)
                 
                 # 处理完一个章节，强制回到列表页，为下一个做准备
                 print("  < 返回目录页...")

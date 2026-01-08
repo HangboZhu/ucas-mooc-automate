@@ -53,7 +53,9 @@ pip install -r requirements.txt
 ### 步骤4：运行脚本
 
 ```bash
-python main.py
+
+# --force 即使没有获取到这个进度条到终止时间，也要进行观看
+python main.py -url XXXX --force
 ```
 
 ## 💡 使用流程

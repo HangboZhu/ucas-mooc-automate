@@ -3,3 +3,4 @@ PyAutoGUI==0.9.54
 pywin32==305.1
 selenium==4.15.2
 tqdm==4.66.1
+Pillow>=9.0.0

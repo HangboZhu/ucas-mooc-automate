@@ -142,6 +142,23 @@ def module_already_completed(driver, module_iframe):
     except Exception:
         return False
 
+# PPT iframe 选择器：覆盖 PDF、PPT、文档等多种类型
+PPT_SELECTORS = (
+    'iframe[src*="/ananas/modules/pdf/index.html"],'
+    'iframe[src*="/ananas/modules/ppt/index.html"],'
+    'iframe[src*="/ananas/modules/doc/index.html"]'
+)
+
+# 视频iframe选择器
+VIDEO_SELECTORS = 'iframe[src*="/ananas/modules/video/index.html"]'
+
+def locate_main_iframe(driver, timeout=20):
+    """重新定位主内容 iframe，避免 StaleElementReferenceException。"""
+    driver.switch_to.default_content()
+    return WebDriverWait(driver, timeout).until(
+        EC.visibility_of_element_located((By.ID, 'iframe'))
+    )
+
 def get_chapter_elements(driver):
     """
     获取当前页面的所有章节链接元素
@@ -248,9 +265,7 @@ def process_single_chapter(driver, chapter_index, force=False):
 
     # 3. 切换到主 iframe
     try:
-        iframe1 = WebDriverWait(driver, 20).until(
-            EC.visibility_of_element_located((By.ID, 'iframe'))
-        )
+        iframe1 = locate_main_iframe(driver)
         driver.switch_to.frame(iframe1)
     except TimeoutException:
         print("未找到内容 iframe，可能该章节为空或加载失败。")
@@ -259,25 +274,35 @@ def process_single_chapter(driver, chapter_index, force=False):
     # ---------------- 视频处理 ----------------
     try:
         # 查找所有视频 iframe
-        video_frames = driver.find_elements(By.CSS_SELECTOR, 'iframe[src*="/ananas/modules/video/index.html"]')
-        print(f"  - 检测到视频数量: {len(video_frames)}")
-        
-        for v_idx, _ in enumerate(video_frames):
-            # 必须重新定位 iframe，因为 switch_to 可能会导致引用丢失
-            driver.switch_to.default_content()
-            driver.switch_to.frame(iframe1)
-            video_frames = driver.find_elements(By.CSS_SELECTOR, 'iframe[src*="/ananas/modules/video/index.html"]')
+        video_frames = driver.find_elements(By.CSS_SELECTOR, VIDEO_SELECTORS)
+        total_videos = len(video_frames)
+        print(f"  - 检测到视频数量: {total_videos}")
 
-            # 在进入 iframe 前检测任务点是否已完成
-            if module_already_completed(driver, video_frames[v_idx]):
-                print(f"    [跳过] 视频 {v_idx+1} 任务点已标记完成，无需播放。")
-                continue
-
-            driver.switch_to.frame(video_frames[v_idx])
-
-            # 播放逻辑
+        processed = 0
+        while processed < total_videos:
             try:
-                print(f"    正在处理视频 {v_idx+1}...")
+                # 重新定位 iframe 和视频帧列表
+                driver.switch_to.default_content()
+                iframe1 = locate_main_iframe(driver)
+                driver.switch_to.frame(iframe1)
+                video_frames = driver.find_elements(By.CSS_SELECTOR, VIDEO_SELECTORS)
+
+                if processed >= len(video_frames):
+                    print(f"    [警告] DOM 中剩余视频帧({len(video_frames)})少于预期(已处理 {processed}, 总计 {total_videos})")
+                    break
+
+                current_frame = video_frames[processed]
+
+                # 在进入 iframe 前检测任务点是否已完成
+                if module_already_completed(driver, current_frame):
+                    print(f"    [跳过] 视频 {processed+1}/{total_videos} 任务点已标记完成，无需播放。")
+                    processed += 1
+                    continue
+
+                driver.switch_to.frame(current_frame)
+
+                # 播放逻辑
+                print(f"    正在处理视频 {processed+1}/{total_videos}...")
 
                 try:
                     WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "video")))
@@ -286,14 +311,15 @@ def process_single_chapter(driver, chapter_index, force=False):
 
                 completed, pre_current, pre_duration, reason = video_already_completed(driver)
                 if completed:
-                    print(f"    [跳过] 视频 {v_idx+1} 已播放完毕（当前: {pre_current:.1f}s / 总时长: {pre_duration:.1f}s，{reason}）。")
+                    print(f"    [跳过] 视频 {processed+1}/{total_videos} 已播放完毕（当前: {pre_current:.1f}s / 总时长: {pre_duration:.1f}s，{reason}）。")
+                    processed += 1
                     continue
 
                 start_btn = WebDriverWait(driver, 10).until(EC.visibility_of_element_located((By.CLASS_NAME, "vjs-big-play-button")))
                 driver.execute_script("arguments[0].click();", start_btn)
                 print("    已点击播放按钮，等待视频加载...")
                 time.sleep(3)  # 增加等待时间，确保视频开始播放
-                
+
                 # 静音处理
                 try:
                     print("    正在设置静音...")
@@ -306,7 +332,7 @@ def process_single_chapter(driver, chapter_index, force=False):
                             print("    已通过音量按钮设置静音")
                     except:
                         pass
-                    
+
                     # 方式2: 通过 JavaScript 直接设置视频元素静音
                     try:
                         video_element = driver.find_element(By.TAG_NAME, "video")
@@ -317,11 +343,11 @@ def process_single_chapter(driver, chapter_index, force=False):
                         pass
                 except Exception as e:
                     print(f"    静音设置失败（继续播放）: {e}")
-                
+
                 # 获取时长和当前进度
                 duration_ele = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "vjs-duration-display")))
                 current_ele = WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, "vjs-current-time-display")))
-                
+
                 # 等待视频真正开始播放（时间开始变化）
                 print("    等待视频开始播放...")
                 initial_time = convertTime(current_ele.text)
@@ -333,12 +359,12 @@ def process_single_chapter(driver, chapter_index, force=False):
                         print(f"    视频已开始播放 (当前时间: {current_check}s)")
                         break
                     wait_count += 1
-                
+
                 total_time = convertTime(duration_ele.text)
                 current_time_val = convertTime(current_ele.text)
-                
+
                 print(f"    [调试] 视频总时长: {total_time}s, 当前时间: {current_time_val}s")
-                
+
                 # 如果总时长为0，尝试通过 JavaScript 获取视频时长
                 if total_time == 0:
                     print("    视频时长未加载，尝试通过 JavaScript 获取...")
@@ -350,7 +376,7 @@ def process_single_chapter(driver, chapter_index, force=False):
                             print(f"    通过 JavaScript 获取到时长: {total_time}s")
                     except:
                         pass
-                
+
                 # 如果总时长为0，说明可能还没加载完成，等待一下
                 if total_time == 0:
                     print("    视频时长未加载，等待中...")
@@ -368,7 +394,7 @@ def process_single_chapter(driver, chapter_index, force=False):
                                 break
                         except:
                             pass
-                
+
                 # 如果仍然无法获取时长，根据 force 参数决定是否继续
                 if total_time == 0:
                     if force:
@@ -378,12 +404,13 @@ def process_single_chapter(driver, chapter_index, force=False):
                     else:
                         print(f"    [警告] 无法获取视频时长，跳过此视频")
                         print(f"    提示: 使用 --force 参数可以强制播放")
+                        processed += 1
                         continue
-                
+
                 # 如果总时长为0（强制模式），使用智能检测
                 if total_time == 0:
                     print(f"    开始播放视频 (强制模式：时长未知，将智能检测完成状态)")
-                    
+
                     # 倍速设置 (尝试)
                     try:
                         speed_btn = driver.find_element(By.CLASS_NAME, "vjs-playback-rate")
@@ -393,19 +420,19 @@ def process_single_chapter(driver, chapter_index, force=False):
                         print("    已设置倍速播放")
                     except:
                         print("    无法设置倍速（可能不支持）")
-                    
+
                     # 强制模式：通过检测视频播放状态来判断是否完成
                     last_time = current_time_val
                     consecutive_paused_count = 0
                     max_no_progress = 30  # 如果30秒没有进度，认为视频已完成
                     no_progress_count = 0
-                    
+
                     print("    正在播放（强制模式）...")
                     while True:
                         try:
                             curr_time = last_time
                             video_playing = True
-                            
+
                             # 优先使用 JavaScript 获取视频状态（更准确）
                             try:
                                 video_element = driver.find_element(By.TAG_NAME, "video")
@@ -413,27 +440,27 @@ def process_single_chapter(driver, chapter_index, force=False):
                                 js_duration = driver.execute_script("return arguments[0].duration;", video_element)
                                 js_paused = driver.execute_script("return arguments[0].paused;", video_element)
                                 js_ended = driver.execute_script("return arguments[0].ended;", video_element)
-                                
+
                                 if js_ended:
                                     print("\n    视频播放完成（检测到 ended 状态）。")
                                     break
-                                
+
                                 if js_duration > 0 and js_current >= js_duration - 2:
                                     print(f"\n    视频播放完成（当前: {js_current:.1f}s / 总时长: {js_duration:.1f}s）。")
                                     break
-                                
+
                                 if js_current is not None and js_current >= 0:
                                     curr_time = int(js_current)
-                                
+
                                 video_playing = not js_paused
-                                
+
                             except:
                                 # 回退到页面元素
                                 try:
                                     curr_time = convertTime(current_ele.text)
                                 except:
                                     pass
-                            
+
                             # 检查视频是否在播放（时间是否在增加）
                             if curr_time > last_time:
                                 no_progress_count = 0
@@ -441,7 +468,7 @@ def process_single_chapter(driver, chapter_index, force=False):
                                 print(f"    播放中... {curr_time}s", end='\r')
                             else:
                                 no_progress_count += 1
-                            
+
                             # 检测暂停状态（只在真正检测到暂停时才处理）
                             if not video_playing:
                                 consecutive_paused_count += 1
@@ -457,28 +484,30 @@ def process_single_chapter(driver, chapter_index, force=False):
                                     consecutive_paused_count = 0
                             else:
                                 consecutive_paused_count = 0
-                            
+
                             # 如果30秒没有进度，可能视频已完成
                             if no_progress_count >= max_no_progress:
                                 print(f"\n    检测到长时间无进度，可能视频已完成。")
                                 break
-                            
+
                             time.sleep(1)
-                            
+
                         except Exception as e:
                             # 静默处理错误
                             time.sleep(1)
-                    
+
                     print("    视频处理完成。")
+                    processed += 1
                     continue
-                
+
                 # 正常模式：有明确的时长
                 # 如果剩余时间少于 5 秒，则跳过（但确保不是刚播放就判断）
                 remaining_time = total_time - current_time_val
                 if remaining_time < 5 and current_time_val > 10:  # 只有当已经播放超过10秒且剩余少于5秒时才跳过
-                    print(f"    [跳过] 视频 {v_idx+1} 已完成 ({current_time_val}s / {total_time}s，剩余 {remaining_time}s)。")
+                    print(f"    [跳过] 视频 {processed+1}/{total_videos} 已完成 ({current_time_val}s / {total_time}s，剩余 {remaining_time}s)。")
+                    processed += 1
                     continue
-                
+
                 print(f"    开始播放视频 (总时长: {total_time}s, 当前: {current_time_val}s, 剩余: {remaining_time}s)")
 
                 # 倍速设置 (尝试)
@@ -490,51 +519,51 @@ def process_single_chapter(driver, chapter_index, force=False):
                     print("    已设置倍速播放")
                 except:
                     print("    无法设置倍速（可能不支持）")
-                
+
                 # 循环检测直到结束，使用 tqdm 显示进度条
-                with tqdm(total=total_time, desc=f"    视频 {v_idx+1}", unit="s", leave=True, ncols=80) as pbar:
+                with tqdm(total=total_time, desc=f"    视频 {processed+1}/{total_videos}", unit="s", leave=True, ncols=80) as pbar:
                     # 初始化进度条到当前位置
                     if current_time_val > 0:
                         pbar.update(current_time_val)
 
                     last_time = current_time_val
                     consecutive_paused_count = 0  # 连续检测到暂停的次数
-                    
+
                     while True:
                         try:
                             # 优先使用 JavaScript 获取视频时间（更准确可靠）
                             curr_time = current_time_val
                             video_playing = True
-                            
+
                             try:
                                 video_element = driver.find_element(By.TAG_NAME, "video")
                                 js_current = driver.execute_script("return arguments[0].currentTime;", video_element)
                                 js_paused = driver.execute_script("return arguments[0].paused;", video_element)
                                 js_ended = driver.execute_script("return arguments[0].ended;", video_element)
-                                
+
                                 if js_ended:
                                     pbar.n = total_time
                                     pbar.refresh()
                                     print("\n    视频播放完成（检测到 ended 状态）。")
                                     break
-                                
+
                                 # 使用 JavaScript 获取的时间（更准确）
                                 if js_current is not None and js_current >= 0:
                                     curr_time = int(js_current)
-                                
+
                                 video_playing = not js_paused
-                                
+
                             except Exception as js_error:
                                 # 如果 JavaScript 获取失败，回退到页面元素
                                 try:
                                     curr_time = convertTime(current_ele.text)
                                 except:
                                     curr_time = last_time
-                            
+
                             # 更新进度条（使用更准确的时间）
                             if curr_time > pbar.n:
                                 pbar.update(curr_time - pbar.n)
-                            
+
                             # 检查是否播放完成（剩余时间少于3秒）
                             remaining = total_time - curr_time
                             if remaining < 3 and remaining >= 0:
@@ -542,7 +571,7 @@ def process_single_chapter(driver, chapter_index, force=False):
                                 pbar.refresh()
                                 print("\n    视频播放完成。")
                                 break
-                            
+
                             # 检测暂停状态（只在真正检测到暂停时才处理）
                             if not video_playing:
                                 consecutive_paused_count += 1
@@ -558,135 +587,167 @@ def process_single_chapter(driver, chapter_index, force=False):
                             else:
                                 consecutive_paused_count = 0
                                 last_time = curr_time
-                            
+
                             time.sleep(1)
-                                
+
                         except Exception as e:
                             # 静默处理错误，避免频繁打印
                             time.sleep(1)
-                        
+
+                print(f"    视频 {processed+1}/{total_videos} 处理完成。")
+                processed += 1
+
+            except StaleElementReferenceException:
+                print(f"    [重试] 视频 {processed+1}/{total_videos} 帧引用过期，重新定位...")
+                time.sleep(1)
+                continue
             except Exception as e:
-                print(f"    视频 {v_idx+1} 处理出错: {e}")
+                print(f"    视频 {processed+1}/{total_videos} 处理出错: {e}")
                 import traceback
                 traceback.print_exc()
-                
+                processed += 1  # 前进计数器，避免死循环
+
     except Exception as e:
         print(f"  视频模块出错: {e}")
 
     # ---------------- PPT 处理 ----------------
     try:
         driver.switch_to.default_content()
+        iframe1 = locate_main_iframe(driver)
         driver.switch_to.frame(iframe1)
-        ppt_frames = driver.find_elements(By.CSS_SELECTOR, 'iframe[src*="/ananas/modules/pdf/index.html"]')
-        if len(ppt_frames) > 0:
-            print(f"  - 检测到 PPT 数量: {len(ppt_frames)}")
+        ppt_frames = driver.find_elements(By.CSS_SELECTOR, PPT_SELECTORS)
+        total_ppts = len(ppt_frames)
+        if total_ppts > 0:
+            print(f"  - 检测到 PPT/文档数量: {total_ppts}")
 
-        for p_idx, _ in enumerate(ppt_frames):
-            driver.switch_to.default_content()
-            driver.switch_to.frame(iframe1)
-            ppt_frames = driver.find_elements(By.CSS_SELECTOR, 'iframe[src*="/ananas/modules/pdf/index.html"]')
+        processed = 0
+        while processed < total_ppts:
+            try:
+                # 重新定位 iframe 和 PPT 帧列表
+                driver.switch_to.default_content()
+                iframe1 = locate_main_iframe(driver)
+                driver.switch_to.frame(iframe1)
+                ppt_frames = driver.find_elements(By.CSS_SELECTOR, PPT_SELECTORS)
 
-            # 在进入 iframe 前检测任务点是否已完成
-            if module_already_completed(driver, ppt_frames[p_idx]):
-                print(f"    [跳过] PPT {p_idx+1} 任务点已标记完成，无需阅读。")
-                continue
-
-            driver.switch_to.frame(ppt_frames[p_idx])
-
-            print(f"    正在处理 PPT {p_idx+1}...")
-
-            # 1. 查找并点击 PPT 查看器自带的全屏按钮
-            fullscreen_clicked = False
-            fullscreen_selectors = [
-                'div.fullsrceen',
-                'span.fullsrceenIcon',
-                'button[title="全屏"]',
-                'span[title="全屏"]',
-                'div[title="全屏"]',
-                'a[title="全屏"]',
-                '[class*="fullscreen"]',
-                '[class*="FullScreen"]',
-                '[class*="full-screen"]',
-                '.bpFullScreen',
-                '#fullscreen',
-                '[data-action="fullscreen"]',
-            ]
-            for selector in fullscreen_selectors:
-                try:
-                    fs_btn = WebDriverWait(driver, 2).until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                    )
-                    fs_btn.click()
-                    fullscreen_clicked = True
-                    print(f"    已点击 PPT 全屏按钮 ({selector})")
-                    time.sleep(2)
+                if processed >= len(ppt_frames):
+                    print(f"    [警告] DOM 中剩余 PPT 帧({len(ppt_frames)})少于预期(已处理 {processed}, 总计 {total_ppts})")
                     break
-                except (TimeoutException, NoSuchElementException):
+
+                current_frame = ppt_frames[processed]
+
+                # 在进入 iframe 前检测任务点是否已完成
+                if module_already_completed(driver, current_frame):
+                    print(f"    [跳过] PPT {processed+1}/{total_ppts} 任务点已标记完成，无需阅读。")
+                    processed += 1
                     continue
 
-            if not fullscreen_clicked:
-                print("    未找到 PPT 全屏按钮，继续常规阅读")
+                driver.switch_to.frame(current_frame)
 
-            # 2. 进入嵌套 iframe #panView，逐步滚动 PPT
-            try:
-                panview = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.ID, 'panView'))
-                )
-                driver.switch_to.frame(panview)
-                print("    已进入 #panView iframe")
+                print(f"    正在处理 PPT {processed+1}/{total_ppts}...")
 
-                # 获取页数和总高度
-                page_count = driver.execute_script(
-                    "return document.querySelectorAll('.pageNum').length;"
-                )
-                scroll_height = driver.execute_script(
-                    "return document.documentElement.scrollHeight;"
-                )
-                client_height = driver.execute_script(
-                    "return document.documentElement.clientHeight;"
-                )
-
-                print(f"    PPT 共 {page_count} 页，总高度 {scroll_height}px，可视高度 {client_height}px")
-
-                if scroll_height <= client_height:
-                    print("    PPT 无需滚动（内容未超出视口）")
-                else:
-                    print("    开始逐步滚动...")
-                    # 每次滚动一页的高度，模拟真实阅读
-                    step_height = client_height * 1.5
-                    total_steps = int((scroll_height - client_height) / step_height) + 1
-
-                    for i in range(total_steps):
-                        driver.execute_script(
-                            "document.documentElement.scrollTop += arguments[0];",
-                            step_height
+                # 1. 查找并点击 PPT 查看器自带的全屏按钮
+                fullscreen_clicked = False
+                fullscreen_selectors = [
+                    'div.fullsrceen',
+                    'span.fullsrceenIcon',
+                    'button[title="全屏"]',
+                    'span[title="全屏"]',
+                    'div[title="全屏"]',
+                    'a[title="全屏"]',
+                    '[class*="fullscreen"]',
+                    '[class*="FullScreen"]',
+                    '[class*="full-screen"]',
+                    '.bpFullScreen',
+                    '#fullscreen',
+                    '[data-action="fullscreen"]',
+                ]
+                for selector in fullscreen_selectors:
+                    try:
+                        fs_btn = WebDriverWait(driver, 2).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
                         )
-                        time.sleep(0.5)
+                        fs_btn.click()
+                        fullscreen_clicked = True
+                        print(f"    已点击 PPT 全屏按钮 ({selector})")
+                        time.sleep(2)
+                        break
+                    except (TimeoutException, NoSuchElementException):
+                        continue
 
-                    # 确保滚到底部
-                    driver.execute_script(
-                        "document.documentElement.scrollTop = document.documentElement.scrollHeight;"
-                    )
-                    print("    已滚动到底部")
+                if not fullscreen_clicked:
+                    print("    未找到 PPT 全屏按钮，继续常规阅读")
 
-            except TimeoutException:
-                print("    未找到 #panView iframe，跳过 PPT 滚动")
-            except Exception as e:
-                print(f"    PPT 滚动出错: {e}")
-
-            # 3. 停留等待完成记录
-            print("    已触底，停留 3 秒以确认完成...")
-            time.sleep(3)
-
-            # 4. 退出全屏
-            if fullscreen_clicked:
+                # 2. 进入嵌套 iframe #panView，逐步滚动 PPT
                 try:
-                    ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-                    time.sleep(1)
-                except:
-                    pass
+                    panview = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.ID, 'panView'))
+                    )
+                    driver.switch_to.frame(panview)
+                    print("    已进入 #panView iframe")
 
-            print("    PPT 处理完毕。")
+                    # 获取页数和总高度
+                    page_count = driver.execute_script(
+                        "return document.querySelectorAll('.pageNum').length;"
+                    )
+                    scroll_height = driver.execute_script(
+                        "return document.documentElement.scrollHeight;"
+                    )
+                    client_height = driver.execute_script(
+                        "return document.documentElement.clientHeight;"
+                    )
+
+                    print(f"    PPT 共 {page_count} 页，总高度 {scroll_height}px，可视高度 {client_height}px")
+
+                    if scroll_height <= client_height:
+                        print("    PPT 无需滚动（内容未超出视口）")
+                    else:
+                        print("    开始逐步滚动...")
+                        # 每次滚动一页的高度，模拟真实阅读
+                        step_height = client_height * 1.5
+                        total_steps = int((scroll_height - client_height) / step_height) + 1
+
+                        for i in range(total_steps):
+                            driver.execute_script(
+                                "document.documentElement.scrollTop += arguments[0];",
+                                step_height
+                            )
+                            time.sleep(0.5)
+
+                        # 确保滚到底部
+                        driver.execute_script(
+                            "document.documentElement.scrollTop = document.documentElement.scrollHeight;"
+                        )
+                        print("    已滚动到底部")
+
+                except TimeoutException:
+                    print("    未找到 #panView iframe，跳过 PPT 滚动")
+                except Exception as e:
+                    print(f"    PPT 滚动出错: {e}")
+
+                # 3. 停留等待完成记录
+                print("    已触底，停留 3 秒以确认完成...")
+                time.sleep(3)
+
+                # 4. 退出全屏
+                if fullscreen_clicked:
+                    try:
+                        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                        time.sleep(1)
+                    except:
+                        pass
+
+                print(f"    PPT {processed+1}/{total_ppts} 处理完毕。")
+                processed += 1
+
+            except StaleElementReferenceException:
+                print(f"    [重试] PPT {processed+1}/{total_ppts} 帧引用过期，重新定位...")
+                time.sleep(1)
+                continue
+            except Exception as e:
+                print(f"    PPT {processed+1}/{total_ppts} 处理出错: {e}")
+                import traceback
+                traceback.print_exc()
+                processed += 1  # 前进计数器，避免死循环
 
     except Exception as e:
         print(f"  PPT模块出错: {e}")

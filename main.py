@@ -20,6 +20,7 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException,
 import time
 import pyautogui
 import argparse
+import re
 
 from tqdm import tqdm
 
@@ -176,6 +177,131 @@ def get_chapter_elements(driver):
     
     return [], False
 
+def chapter_is_completed(row_text, row_div=None, indicator_element=None):
+    """
+    判断章节行是否显示已完成。
+    """
+    if "已完成" in row_text:
+        return True
+
+    if row_div is not None:
+        try:
+            if row_div.find_elements(By.CLASS_NAME, "icon_Completed"):
+                return True
+        except Exception:
+            pass
+
+    if indicator_element is not None:
+        try:
+            class_attr = indicator_element.get_attribute('class') or ''
+            return 'orange01' not in class_attr
+        except Exception:
+            pass
+
+    return False
+
+def chapter_is_quiz(row_text):
+    """
+    判断章节行是否为测验。
+    """
+    normalized = row_text.lower()
+    return "测验" in row_text or "quiz" in normalized
+
+def get_chapter_infos(driver):
+    """
+    获取章节目录信息，供列出章节和扫描进度共用。
+    """
+    elements, is_new_ui = get_chapter_elements(driver)
+    infos = []
+
+    if is_new_ui:
+        for i, el in enumerate(elements):
+            try:
+                row_div = el.find_element(By.XPATH, "./..")
+                row_text = row_div.text.strip()
+            except Exception:
+                row_div = None
+                row_text = (el.text or '').strip()
+
+            title = row_text or f"章节 {i}"
+            infos.append({
+                "index": i,
+                "title": title,
+                "completed": chapter_is_completed(row_text, row_div=row_div),
+                "is_quiz": chapter_is_quiz(row_text),
+            })
+    else:
+        span_elements = driver.find_elements(By.CLASS_NAME, 'roundpointStudent')
+        for i, el in enumerate(elements):
+            row_text = (el.text or '').strip()
+            indicator = span_elements[i] if i < len(span_elements) else None
+            infos.append({
+                "index": i,
+                "title": row_text or f"章节 {i}",
+                "completed": chapter_is_completed(row_text, indicator_element=indicator),
+                "is_quiz": chapter_is_quiz(row_text),
+            })
+
+    return infos, is_new_ui
+
+def print_chapter_list(driver):
+    """
+    打印当前课程的章节索引列表。
+    """
+    print("正在读取章节列表...")
+
+    try:
+        WebDriverWait(driver, 15).until(lambda d: d.find_elements(By.CLASS_NAME, 'onetoone') or d.find_elements(By.CLASS_NAME, 'posCatalog_select'))
+    except TimeoutException:
+        print("读取超时：未找到章节列表，请确认已进入课程章节页面。")
+        return []
+
+    infos, is_new_ui = get_chapter_infos(driver)
+    print(f"识别到 {len(infos)} 个章节 (UI模式: {'新版' if is_new_ui else '旧版'})")
+    print("-----------------------章节索引列表-----------------------")
+
+    for info in infos:
+        status = "测验" if info["is_quiz"] else ("已完成" if info["completed"] else "未完成")
+        title = re.sub(r'\s+', ' ', info["title"]).strip()
+        print(f"[{info['index']}] {status} - {title}")
+
+    return infos
+
+def parse_chapter_indices(raw_values):
+    """
+    解析 --chapter-index 参数，支持 1、1,3、1-4 以及重复传参。
+    """
+    indices = []
+
+    for raw_value in raw_values or []:
+        for part in raw_value.split(','):
+            token = part.strip()
+            if not token:
+                continue
+
+            range_match = re.fullmatch(r'(\d+)\s*-\s*(\d+)', token)
+            if range_match:
+                start = int(range_match.group(1))
+                end = int(range_match.group(2))
+                if start > end:
+                    raise ValueError(f"章节范围无效: {token}")
+                indices.extend(range(start, end + 1))
+                continue
+
+            if not re.fullmatch(r'\d+', token):
+                raise ValueError(f"章节索引格式无效: {token}")
+
+            indices.append(int(token))
+
+    deduped = []
+    seen = set()
+    for index in indices:
+        if index not in seen:
+            deduped.append(index)
+            seen.add(index)
+
+    return deduped
+
 def scan_progress(driver):
     """
     扫描当前课程页面的进度，返回未完成章节的索引列表
@@ -189,44 +315,15 @@ def scan_progress(driver):
         print("扫描超时：未找到章节列表，请确认已进入课程章节页面。")
         return []
 
-    elements, is_new_ui = get_chapter_elements(driver)
-    print(f"识别到 {len(elements)} 个章节 (UI模式: {'新版' if is_new_ui else '旧版'})")
+    infos, is_new_ui = get_chapter_infos(driver)
+    print(f"识别到 {len(infos)} 个章节 (UI模式: {'新版' if is_new_ui else '旧版'})")
     
     ret = []
     print("-----------------------未完成章节列表---------------------")
-    
-    if is_new_ui:
-        for i, el in enumerate(elements):
-            try:
-                # 获取父级 div.posCatalog_select 以检查完成状态
-                row_div = el.find_element(By.XPATH, "./..")
-                row_text = row_div.text
-                completed_icon = row_div.find_elements(By.CLASS_NAME, "icon_Completed")
-                
-                # 如果没有 icon_Completed 且文本不包含“已完成”
-                if not completed_icon and "已完成" not in row_text:
-                    if "测验" not in row_text and "Quiz" not in row_text:
-                        ret.append(i)
-            except:
-                pass
-    else:
-        # 旧版逻辑
-        try:
-            span_elements = driver.find_elements(By.CLASS_NAME, 'roundpointStudent')
-            min_len = min(len(span_elements), len(elements))
-            for i in range(min_len):
-                class_attr = span_elements[i].get_attribute('class')
-                if 'orange01' in class_attr: # 黄色表示未完成
-                    spans = elements[i].find_elements(By.TAG_NAME, "span")
-                    is_quiz = False
-                    for span in spans:
-                        if "quiz" in span.text.lower() or "测验" in span.text:
-                            is_quiz = True
-                            break
-                    if not is_quiz:
-                        ret.append(i)
-        except Exception as e:
-            print(f"旧版扫描出错: {e}")
+
+    for info in infos:
+        if not info["completed"] and not info["is_quiz"]:
+            ret.append(info["index"])
 
     print("未完成章节索引：", ret)
     return ret
@@ -762,7 +859,16 @@ def main():
                         help='课程章节页面的URL')
     parser.add_argument('--force', action='store_true',
                         help='强制播放模式：即使无法获取视频时长也继续播放')
+    parser.add_argument('--chapter-index', action='append', default=[],
+                        help='手动指定要处理的章节索引，使用 --list-chapters 查看。支持单个、逗号列表和范围，例如 3、1,4,8、2-5；可重复传参。')
+    parser.add_argument('--list-chapters', action='store_true',
+                        help='登录并进入课程目录后，仅列出所有章节索引和状态，不自动刷课')
     args = parser.parse_args()
+
+    try:
+        manual_indices = parse_chapter_indices(args.chapter_index)
+    except ValueError as e:
+        parser.error(str(e))
     
     print("="*60)
     print("   超星慕课刷课脚本 (Mac 单实例版)")
@@ -788,6 +894,47 @@ def main():
     # 3. 记录课程主页 URL，方便后续返回
     course_list_url = driver.current_url
     print(f"已锁定课程主页: {course_list_url}")
+
+    if args.list_chapters:
+        print_chapter_list(driver)
+        print("章节列表已输出，脚本运行结束。")
+        driver.quit()
+        return
+
+    if manual_indices:
+        infos, _ = get_chapter_infos(driver)
+        max_index = len(infos) - 1
+        invalid_indices = [idx for idx in manual_indices if idx < 0 or idx > max_index]
+        if invalid_indices:
+            print(f"手动章节索引越界: {invalid_indices}。当前有效范围: 0-{max_index}")
+            print("可使用 --list-chapters 查看章节索引。")
+            driver.quit()
+            return
+
+        print(f"\n已启用手动章节模式，待处理索引: {manual_indices}")
+        for idx in manual_indices:
+            try:
+                if driver.current_url != course_list_url:
+                    driver.get(course_list_url)
+                    time.sleep(3)
+
+                process_single_chapter(driver, idx, force=args.force)
+
+                print("  < 返回目录页...")
+                driver.get(course_list_url)
+                time.sleep(3)
+
+            except Exception as e:
+                print(f"处理过程中发生异常: {e}")
+                try:
+                    driver.get(course_list_url)
+                    time.sleep(5)
+                except:
+                    break
+
+        print("手动章节处理完成，脚本运行结束。")
+        driver.quit()
+        return
 
     while True:
         # 4. 扫描进度

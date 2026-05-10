@@ -57,6 +57,14 @@ pip install -r requirements.txt
 
 # --force 即使没有获取到这个进度条到终止时间，也要进行观看
 python main.py -url XXXX --force
+
+# 登录后仅列出章节索引和状态，不自动刷课
+python main.py -url XXXX --list-chapters
+
+# 手动指定要处理的小节（索引为 --list-chapters 输出的 0 基索引）
+python main.py -url XXXX --chapter-index 3
+python main.py -url XXXX --chapter-index 1,4,8
+python main.py -url XXXX --chapter-index 2-5 --force
 ```
 
 ## 💡 使用流程
@@ -85,6 +93,7 @@ python main.py -url XXXX --force
 - ✅ 跳过已完成章节和测验内容
 - ✅ 循环扫描确保无遗漏
 - ✅ 异常恢复和重试机制
+- ✅ 支持列出章节索引并手动指定小节处理
 
 ## 📋 系统要求
 

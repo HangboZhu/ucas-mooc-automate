@@ -53,6 +53,129 @@ def is_finite_positive(value):
     except Exception:
         return False
 
+def format_playback_rate(rate):
+    try:
+        return f"{float(rate):.1f}x"
+    except Exception:
+        return "未知"
+
+def get_video_playback_rate(driver):
+    try:
+        rate = driver.execute_script("""
+            const video = document.querySelector('video');
+            if (!video || !Number.isFinite(video.playbackRate)) {
+                return null;
+            }
+            return video.playbackRate;
+        """)
+        if rate is not None:
+            return float(rate)
+    except Exception:
+        pass
+    return None
+
+def set_video_playback_rate(driver, target_rate=2.0):
+    """
+    直接设置 HTML5 video 倍速，并尽量同步 Video.js 播放器状态。
+    返回 (是否达到目标倍速, 当前实际倍速, 详情)。
+    """
+    try:
+        result = driver.execute_script("""
+            const target = Number(arguments[0]);
+            const video = document.querySelector('video');
+            const result = {ok: false, rate: null, detail: ''};
+
+            if (!video) {
+                result.detail = '未找到 video 元素';
+                return result;
+            }
+
+            const details = [];
+
+            try {
+                video.defaultPlaybackRate = target;
+                video.playbackRate = target;
+                details.push('HTML5 video');
+            } catch (e) {
+                details.push(`HTML5 设置失败: ${e.message}`);
+            }
+
+            try {
+                const playerIds = [];
+                const playerEl = video.closest('.video-js') || document.querySelector('.video-js');
+                if (playerEl && playerEl.id) {
+                    playerIds.push(playerEl.id);
+                }
+                if (video.id) {
+                    playerIds.push(video.id);
+                }
+
+                if (window.videojs) {
+                    for (const id of playerIds) {
+                        try {
+                            const player = window.videojs(id);
+                            if (player && typeof player.playbackRate === 'function') {
+                                player.playbackRate(target);
+                                details.push(`Video.js: ${id}`);
+                                break;
+                            }
+                        } catch (e) {}
+                    }
+
+                    if (window.videojs.getPlayers) {
+                        const players = window.videojs.getPlayers();
+                        for (const key of Object.keys(players || {})) {
+                            const player = players[key];
+                            if (player && typeof player.playbackRate === 'function') {
+                                player.playbackRate(target);
+                                details.push(`Video.js player: ${key}`);
+                                break;
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                details.push(`Video.js 设置失败: ${e.message}`);
+            }
+
+            try {
+                video.defaultPlaybackRate = target;
+                video.playbackRate = target;
+            } catch (e) {}
+
+            result.rate = Number.isFinite(video.playbackRate) ? video.playbackRate : null;
+            result.ok = result.rate !== null && Math.abs(result.rate - target) < 0.05;
+            result.detail = details.join(', ');
+            return result;
+        """, float(target_rate))
+
+        current_rate = result.get("rate") if result else None
+        if current_rate is not None:
+            current_rate = float(current_rate)
+        return bool(result and result.get("ok")), current_rate, (result or {}).get("detail", "")
+    except Exception as e:
+        return False, None, str(e)
+
+def ensure_video_playback_rate(driver, target_rate=2.0):
+    ok, current_rate, detail = set_video_playback_rate(driver, target_rate)
+    if ok:
+        print(f"    已设置倍速播放：{format_playback_rate(current_rate)}")
+    elif current_rate is not None:
+        print(f"    [警告] 倍速未达到目标，当前 {format_playback_rate(current_rate)}，目标 {format_playback_rate(target_rate)}")
+    else:
+        print(f"    无法设置倍速（{detail or '播放器可能不支持'}）")
+    return current_rate
+
+def keep_target_playback_rate(driver, current_rate=None, target_rate=2.0):
+    try:
+        if current_rate is None or abs(float(current_rate) - float(target_rate)) >= 0.05:
+            ok, updated_rate, _ = set_video_playback_rate(driver, target_rate)
+            if updated_rate is not None:
+                return updated_rate, ok
+    except Exception:
+        pass
+    return current_rate, False
+
 def get_video_state(driver):
     """
     读取当前视频 iframe 内的播放状态。只读取状态，不触发播放。
@@ -62,6 +185,7 @@ def get_video_state(driver):
         "duration": 0,
         "ended": False,
         "paused": True,
+        "playback_rate": 1.0,
     }
 
     try:
@@ -74,7 +198,8 @@ def get_video_state(driver):
                 current: Number.isFinite(video.currentTime) ? video.currentTime : 0,
                 duration: Number.isFinite(video.duration) ? video.duration : 0,
                 ended: !!video.ended,
-                paused: !!video.paused
+                paused: !!video.paused,
+                playback_rate: Number.isFinite(video.playbackRate) ? video.playbackRate : 1
             };
         """)
         if js_state:
@@ -411,15 +536,7 @@ def process_single_chapter(driver, chapter_index, force=False):
                 if total_time == 0:
                     print(f"    开始播放视频 (强制模式：时长未知，将智能检测完成状态)")
 
-                    # 倍速设置 (尝试)
-                    try:
-                        speed_btn = driver.find_element(By.CLASS_NAME, "vjs-playback-rate")
-                        speed_btn.click()
-                        time.sleep(0.5)
-                        speed_btn.click() # 切换到 2x
-                        print("    已设置倍速播放")
-                    except:
-                        print("    无法设置倍速（可能不支持）")
+                    current_rate = ensure_video_playback_rate(driver, 2.0)
 
                     # 强制模式：通过检测视频播放状态来判断是否完成
                     last_time = current_time_val
@@ -440,6 +557,7 @@ def process_single_chapter(driver, chapter_index, force=False):
                                 js_duration = driver.execute_script("return arguments[0].duration;", video_element)
                                 js_paused = driver.execute_script("return arguments[0].paused;", video_element)
                                 js_ended = driver.execute_script("return arguments[0].ended;", video_element)
+                                js_rate = driver.execute_script("return arguments[0].playbackRate;", video_element)
 
                                 if js_ended:
                                     print("\n    视频播放完成（检测到 ended 状态）。")
@@ -453,6 +571,7 @@ def process_single_chapter(driver, chapter_index, force=False):
                                     curr_time = int(js_current)
 
                                 video_playing = not js_paused
+                                current_rate, _ = keep_target_playback_rate(driver, js_rate, 2.0)
 
                             except:
                                 # 回退到页面元素
@@ -465,9 +584,10 @@ def process_single_chapter(driver, chapter_index, force=False):
                             if curr_time > last_time:
                                 no_progress_count = 0
                                 last_time = curr_time
-                                print(f"    播放中... {curr_time}s", end='\r')
                             else:
                                 no_progress_count += 1
+                            play_state_text = "播放中" if video_playing else "已暂停"
+                            print(f"    {play_state_text}... {curr_time}s | 倍速 {format_playback_rate(current_rate)}", end='\r')
 
                             # 检测暂停状态（只在真正检测到暂停时才处理）
                             if not video_playing:
@@ -510,15 +630,7 @@ def process_single_chapter(driver, chapter_index, force=False):
 
                 print(f"    开始播放视频 (总时长: {total_time}s, 当前: {current_time_val}s, 剩余: {remaining_time}s)")
 
-                # 倍速设置 (尝试)
-                try:
-                    speed_btn = driver.find_element(By.CLASS_NAME, "vjs-playback-rate")
-                    speed_btn.click()
-                    time.sleep(0.5)
-                    speed_btn.click() # 切换到 2x
-                    print("    已设置倍速播放")
-                except:
-                    print("    无法设置倍速（可能不支持）")
+                current_rate = ensure_video_playback_rate(driver, 2.0)
 
                 # 循环检测直到结束，使用 tqdm 显示进度条
                 with tqdm(total=total_time, desc=f"    视频 {processed+1}/{total_videos}", unit="s", leave=True, ncols=80) as pbar:
@@ -540,6 +652,7 @@ def process_single_chapter(driver, chapter_index, force=False):
                                 js_current = driver.execute_script("return arguments[0].currentTime;", video_element)
                                 js_paused = driver.execute_script("return arguments[0].paused;", video_element)
                                 js_ended = driver.execute_script("return arguments[0].ended;", video_element)
+                                js_rate = driver.execute_script("return arguments[0].playbackRate;", video_element)
 
                                 if js_ended:
                                     pbar.n = total_time
@@ -552,6 +665,7 @@ def process_single_chapter(driver, chapter_index, force=False):
                                     curr_time = int(js_current)
 
                                 video_playing = not js_paused
+                                current_rate, _ = keep_target_playback_rate(driver, js_rate, 2.0)
 
                             except Exception as js_error:
                                 # 如果 JavaScript 获取失败，回退到页面元素
@@ -563,6 +677,7 @@ def process_single_chapter(driver, chapter_index, force=False):
                             # 更新进度条（使用更准确的时间）
                             if curr_time > pbar.n:
                                 pbar.update(curr_time - pbar.n)
+                            pbar.set_postfix_str(f"倍速 {format_playback_rate(current_rate)}")
 
                             # 检查是否播放完成（剩余时间少于3秒）
                             remaining = total_time - curr_time

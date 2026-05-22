@@ -96,6 +96,23 @@ def get_video_state(driver):
 
     return state
 
+def set_video_playback_rate(driver, rate=2.0):
+    """
+    直接设置当前视频 iframe 内 video 元素的倍速，并返回实际倍速。
+    """
+    try:
+        actual_rate = driver.execute_script("""
+            const video = document.querySelector('video');
+            if (!video) {
+                return null;
+            }
+            video.playbackRate = arguments[0];
+            return video.playbackRate;
+        """, rate)
+        return actual_rate
+    except Exception:
+        return None
+
 def video_already_completed(driver):
     """
     在点击播放前判断视频是否已经完成。
@@ -231,7 +248,7 @@ def scan_progress(driver):
     print("未完成章节索引：", ret)
     return ret
 
-def process_single_chapter(driver, chapter_index, force=False):
+def process_single_chapter(driver, chapter_index, force=False, ppt_scroll_delay=0.1):
     """
     处理单个章节：包含视频播放和PPT查看
     :param driver: WebDriver 实例
@@ -411,14 +428,10 @@ def process_single_chapter(driver, chapter_index, force=False):
                 if total_time == 0:
                     print(f"    开始播放视频 (强制模式：时长未知，将智能检测完成状态)")
 
-                    # 倍速设置 (尝试)
-                    try:
-                        speed_btn = driver.find_element(By.CLASS_NAME, "vjs-playback-rate")
-                        speed_btn.click()
-                        time.sleep(0.5)
-                        speed_btn.click() # 切换到 2x
-                        print("    已设置倍速播放")
-                    except:
+                    actual_rate = set_video_playback_rate(driver, 2.0)
+                    if actual_rate:
+                        print(f"    已设置倍速播放: {actual_rate}x")
+                    else:
                         print("    无法设置倍速（可能不支持）")
 
                     # 强制模式：通过检测视频播放状态来判断是否完成
@@ -435,6 +448,7 @@ def process_single_chapter(driver, chapter_index, force=False):
 
                             # 优先使用 JavaScript 获取视频状态（更准确）
                             try:
+                                set_video_playback_rate(driver, 2.0)
                                 video_element = driver.find_element(By.TAG_NAME, "video")
                                 js_current = driver.execute_script("return arguments[0].currentTime;", video_element)
                                 js_duration = driver.execute_script("return arguments[0].duration;", video_element)
@@ -510,14 +524,10 @@ def process_single_chapter(driver, chapter_index, force=False):
 
                 print(f"    开始播放视频 (总时长: {total_time}s, 当前: {current_time_val}s, 剩余: {remaining_time}s)")
 
-                # 倍速设置 (尝试)
-                try:
-                    speed_btn = driver.find_element(By.CLASS_NAME, "vjs-playback-rate")
-                    speed_btn.click()
-                    time.sleep(0.5)
-                    speed_btn.click() # 切换到 2x
-                    print("    已设置倍速播放")
-                except:
+                actual_rate = set_video_playback_rate(driver, 2.0)
+                if actual_rate:
+                    print(f"    已设置倍速播放: {actual_rate}x")
+                else:
                     print("    无法设置倍速（可能不支持）")
 
                 # 循环检测直到结束，使用 tqdm 显示进度条
@@ -536,6 +546,7 @@ def process_single_chapter(driver, chapter_index, force=False):
                             video_playing = True
 
                             try:
+                                set_video_playback_rate(driver, 2.0)
                                 video_element = driver.find_element(By.TAG_NAME, "video")
                                 js_current = driver.execute_script("return arguments[0].currentTime;", video_element)
                                 js_paused = driver.execute_script("return arguments[0].paused;", video_element)
@@ -711,7 +722,7 @@ def process_single_chapter(driver, chapter_index, force=False):
                                 "document.documentElement.scrollTop += arguments[0];",
                                 step_height
                             )
-                            time.sleep(0.5)
+                            time.sleep(ppt_scroll_delay)
 
                         # 确保滚到底部
                         driver.execute_script(
@@ -762,7 +773,11 @@ def main():
                         help='课程章节页面的URL')
     parser.add_argument('--force', action='store_true',
                         help='强制播放模式：即使无法获取视频时长也继续播放')
+    parser.add_argument('--ppt-scroll-delay', type=float, default=0.1,
+                        help='PPT每次滚动后的等待秒数，越小滚动越快，默认0.1')
     args = parser.parse_args()
+    if args.ppt_scroll_delay < 0:
+        parser.error('--ppt-scroll-delay 不能小于0')
     
     print("="*60)
     print("   超星慕课刷课脚本 (Mac 单实例版)")
@@ -808,7 +823,7 @@ def main():
                     driver.get(course_list_url)
                     time.sleep(3)
                 
-                process_single_chapter(driver, idx, force=args.force)
+                process_single_chapter(driver, idx, force=args.force, ppt_scroll_delay=args.ppt_scroll_delay)
                 
                 # 处理完一个章节，强制回到列表页，为下一个做准备
                 print("  < 返回目录页...")

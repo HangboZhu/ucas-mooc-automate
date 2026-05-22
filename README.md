@@ -57,6 +57,9 @@ pip install -r requirements.txt
 
 # --force 即使没有获取到这个进度条到终止时间，也要进行观看
 python main.py -url XXXX --force
+
+# PPT滚动速度：每次滚动后等待0.1秒，数值越小越快，默认0.1
+python main.py -url XXXX --ppt-scroll-delay 0.1
 ```
 
 ## 💡 使用流程
@@ -76,7 +79,7 @@ python main.py -url XXXX --force
 - ✅ 实时进度条显示播放进度
 
 ### 自动PPT处理
-- ✅ 深度模拟阅读（50轮滚动）
+- ✅ 深度模拟阅读，支持自定义滚动速度
 - ✅ 强制滚动到底部触发完成状态
 - ✅ 增强鼠标移动兼容性
 
